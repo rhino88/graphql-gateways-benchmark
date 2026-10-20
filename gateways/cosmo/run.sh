@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 exec env -i LOG_LEVEL=fatal \
+    ACCESS_LOGS_ENABLED=false \
     LISTEN_ADDR=0.0.0.0:4000 \
     TRACING_ENABLED=false \
     METRICS_ENABLED=false \
