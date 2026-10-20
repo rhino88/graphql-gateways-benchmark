@@ -8,7 +8,8 @@ set -Eeuo pipefail
 #   WAIT_FOR_URL="http://127.0.0.1:4000/health"  # healthcheck URL
 #   WARMUP_SECONDS=15
 #   MEASURE_SECONDS=60
-#   LOAD_MODE="constant"        # "constant" or "stress"
+#   LOAD_MODE="constant"        # "constant", "stress" or "planning"
+#   PLANNING_ITERATIONS=200     # planning mode: measured iterations per query tier
 
 command -v realpath >/dev/null || { echo "realpath required"; exit 1; }
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
@@ -205,6 +206,28 @@ cleanup() {
   fi
 }
 trap cleanup EXIT INT TERM
+
+if [[ "$LOAD_MODE" == "planning" ]]; then
+  # The planning benchmark sends requests from k6's setup() right away, so
+  # wait until the gateway actually serves GraphQL.
+  echo "Waiting for the gateway to serve GraphQL ..."
+  for _ in {1..120}; do
+    if curl -fsS --max-time 1 -H 'Content-Type: application/json' \
+      -d '{"query":"{ __typename }"}' "http://127.0.0.1:4000/graphql" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.5
+  done
+
+  echo "Query planning benchmark ..."
+  maybe_taskset "${LOAD_CPUSET}" k6 run -e SUMMARY_PATH="$(pwd)" "$SCRIPT_DIR/k6-planning.js"
+
+  echo "Summary:"
+  cargo run -p toolkit planning-report "$(pwd)"
+
+  echo "Planning test for gateway '$GATEWAY_NAME' completed successfully."
+  exit 0
+fi
 
 # Warmup
 echo "Warmup ($WARMUP_SECONDS s) ..."

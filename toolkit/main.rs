@@ -19,6 +19,26 @@ struct Stats {
     success_rate: f64,
 }
 
+#[derive(Serialize, Deserialize)]
+struct PlanningTierStats {
+    tier: String,
+    /// Paired (cold - warm) latency: time spent preparing a never-seen operation.
+    overhead_avg: f64,
+    overhead_med: f64,
+    overhead_p95: f64,
+    overhead_p99: f64,
+    cold_med: f64,
+    cold_p95: f64,
+    warm_med: f64,
+    warm_p95: f64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PlanningStats {
+    success_rate: f64,
+    tiers: Vec<PlanningTierStats>,
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -28,10 +48,16 @@ fn main() {
         summary();
     } else if &args[1] == "data" {
         data();
+    } else if &args[1] == "planning-report" {
+        planning_report(&args[2]);
+    } else if &args[1] == "planning-summary" {
+        planning_summary(args.get(2).map(|s| s.as_str()).unwrap_or("gateways"));
     } else {
         eprintln!("Usage: cargo run -p toolkit report <gateway-dir>");
         eprintln!("Usage: cargo run -p toolkit summary");
         eprintln!("Usage: cargo run -p toolkit data");
+        eprintln!("Usage: cargo run -p toolkit planning-report <gateway-dir>");
+        eprintln!("Usage: cargo run -p toolkit planning-summary [dir]");
     }
 }
 
@@ -217,6 +243,134 @@ fn report(pwd: &str) {
         sonic_rs::to_string_pretty(&stats).unwrap(),
     )
     .expect("Unable to write stats.json")
+}
+
+fn planning_report(pwd: &str) {
+    let raw = read_file(&format!("{}/k6_planning_summary.json", pwd));
+    let summary: sonic_rs::Value =
+        sonic_rs::from_str(&raw).expect("Unable to parse k6_planning_summary.json");
+    let summary = summary.as_object().unwrap();
+    let metrics = summary.get(&"metrics").unwrap().as_object().unwrap();
+
+    let metric = |name: &str, stat: &str| -> f64 {
+        metrics
+            .get(&name)
+            .and_then(|m| m.as_object())
+            .and_then(|m| m.get(&"values"))
+            .and_then(|v| v.as_object())
+            .and_then(|v| v.get(&stat))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(f64::NAN)
+    };
+
+    let tiers = summary
+        .get(&"tiers")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| {
+            let tier = t.as_str().unwrap().to_string();
+            let overhead = format!("planning_{}_overhead", tier);
+            let cold = format!("planning_{}_cold", tier);
+            let warm = format!("planning_{}_warm", tier);
+            PlanningTierStats {
+                overhead_avg: metric(&overhead, "avg"),
+                overhead_med: metric(&overhead, "med"),
+                overhead_p95: metric(&overhead, "p(95)"),
+                overhead_p99: metric(&overhead, "p(99)"),
+                cold_med: metric(&cold, "med"),
+                cold_p95: metric(&cold, "p(95)"),
+                warm_med: metric(&warm, "med"),
+                warm_p95: metric(&warm, "p(95)"),
+                tier,
+            }
+        })
+        .collect();
+
+    let stats = PlanningStats {
+        success_rate: metric("success_rate", "rate"),
+        tiers,
+    };
+
+    std::fs::write(
+        format!("{}/planning_stats.json", pwd),
+        sonic_rs::to_string_pretty(&stats).unwrap(),
+    )
+    .expect("Unable to write planning_stats.json");
+
+    let name = std::path::Path::new(pwd)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    print_planning_tables(vec![(name, stats)]);
+}
+
+/// Collects `<dir>/*/planning_stats.json` and prints one table per query tier.
+/// When `SCENARIO_ARTIFACTS_PREFIX` is set (CI artifacts), it is stripped from
+/// the directory names.
+fn planning_summary(dir: &str) {
+    let prefix = env::var("SCENARIO_ARTIFACTS_PREFIX").unwrap_or_default();
+    let mut reports: Vec<(String, PlanningStats)> = Vec::new();
+
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        if !entry.metadata().unwrap().is_dir() {
+            continue;
+        }
+        let Ok(raw) =
+            std::fs::read_to_string(entry.path().join("planning_stats.json"))
+        else {
+            continue;
+        };
+        let stats: PlanningStats = sonic_rs::from_str(&raw).unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let name = name.strip_prefix(&prefix).unwrap_or(&name).to_string();
+        reports.push((name, stats));
+    }
+
+    print_planning_tables(reports);
+}
+
+fn print_planning_tables(reports: Vec<(String, PlanningStats)>) {
+    let Some((_, first)) = reports.first() else {
+        eprintln!("No planning_stats.json found");
+        return;
+    };
+    let tiers: Vec<String> = first.tiers.iter().map(|t| t.tier.clone()).collect();
+
+    for tier in tiers {
+        let mut rows: Vec<(&str, &PlanningTierStats, f64)> = reports
+            .iter()
+            .filter_map(|(name, stats)| {
+                stats
+                    .tiers
+                    .iter()
+                    .find(|t| t.tier == tier)
+                    .map(|t| (name.as_str(), t, stats.success_rate))
+            })
+            .collect();
+        rows.sort_by(|a, b| a.1.overhead_med.total_cmp(&b.1.overhead_med));
+
+        println!("### Query planning: `{}` query", tier);
+        println!();
+        println!(
+            "| Gateway | Planning overhead p50 (ms) | p95 (ms) | p99 (ms) | Cold p50 (ms) | Warm p50 (ms) | Success Rate (%) |"
+        );
+        println!("| --- | --- | --- | --- | --- | --- | --- |");
+        for (name, t, success_rate) in rows {
+            println!(
+                "| {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.2} |",
+                name,
+                t.overhead_med,
+                t.overhead_p95,
+                t.overhead_p99,
+                t.cold_med,
+                t.warm_med,
+                success_rate * 100.0
+            );
+        }
+        println!();
+    }
 }
 
 fn read_file(filepath: &str) -> String {
