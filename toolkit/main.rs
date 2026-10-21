@@ -19,6 +19,34 @@ struct Stats {
     success_rate: f64,
 }
 
+#[derive(Serialize, Deserialize)]
+struct Percentiles {
+    avg: f64,
+    min: f64,
+    p50: f64,
+    p75: f64,
+    p90: f64,
+    p95: f64,
+    p99: f64,
+    p99_9: f64,
+    max: f64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PlanningTierStats {
+    tier: String,
+    /// Paired (cold - warm) latency: time spent preparing a never-seen operation.
+    overhead: Percentiles,
+    cold: Percentiles,
+    warm: Percentiles,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PlanningStats {
+    success_rate: f64,
+    tiers: Vec<PlanningTierStats>,
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -28,10 +56,16 @@ fn main() {
         summary();
     } else if &args[1] == "data" {
         data();
+    } else if &args[1] == "planning-report" {
+        planning_report(&args[2]);
+    } else if &args[1] == "planning-summary" {
+        planning_summary(args.get(2).map(|s| s.as_str()).unwrap_or("gateways"));
     } else {
         eprintln!("Usage: cargo run -p toolkit report <gateway-dir>");
         eprintln!("Usage: cargo run -p toolkit summary");
         eprintln!("Usage: cargo run -p toolkit data");
+        eprintln!("Usage: cargo run -p toolkit planning-report <gateway-dir>");
+        eprintln!("Usage: cargo run -p toolkit planning-summary [dir]");
     }
 }
 
@@ -217,6 +251,144 @@ fn report(pwd: &str) {
         sonic_rs::to_string_pretty(&stats).unwrap(),
     )
     .expect("Unable to write stats.json")
+}
+
+fn planning_report(pwd: &str) {
+    let raw = read_file(&format!("{}/k6_planning_summary.json", pwd));
+    let summary: sonic_rs::Value =
+        sonic_rs::from_str(&raw).expect("Unable to parse k6_planning_summary.json");
+    let summary = summary.as_object().unwrap();
+    let metrics = summary.get(&"metrics").unwrap().as_object().unwrap();
+
+    let metric = |name: &str, stat: &str| -> f64 {
+        metrics
+            .get(&name)
+            .and_then(|m| m.as_object())
+            .and_then(|m| m.get(&"values"))
+            .and_then(|v| v.as_object())
+            .and_then(|v| v.get(&stat))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(f64::NAN)
+    };
+    let percentiles = |name: &str| Percentiles {
+        avg: metric(name, "avg"),
+        min: metric(name, "min"),
+        p50: metric(name, "med"),
+        p75: metric(name, "p(75)"),
+        p90: metric(name, "p(90)"),
+        p95: metric(name, "p(95)"),
+        p99: metric(name, "p(99)"),
+        p99_9: metric(name, "p(99.9)"),
+        max: metric(name, "max"),
+    };
+
+    let tiers = summary
+        .get(&"tiers")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| {
+            let tier = t.as_str().unwrap().to_string();
+            PlanningTierStats {
+                overhead: percentiles(&format!("planning_{}_overhead", tier)),
+                cold: percentiles(&format!("planning_{}_cold", tier)),
+                warm: percentiles(&format!("planning_{}_warm", tier)),
+                tier,
+            }
+        })
+        .collect();
+
+    let stats = PlanningStats {
+        success_rate: metric("success_rate", "rate"),
+        tiers,
+    };
+
+    std::fs::write(
+        format!("{}/planning_stats.json", pwd),
+        sonic_rs::to_string_pretty(&stats).unwrap(),
+    )
+    .expect("Unable to write planning_stats.json");
+
+    let name = std::path::Path::new(pwd)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    print_planning_tables(vec![(name, stats)]);
+}
+
+/// Collects `<dir>/*/planning_stats.json` and prints one table per query tier.
+/// When `SCENARIO_ARTIFACTS_PREFIX` is set (CI artifacts), it is stripped from
+/// the directory names.
+fn planning_summary(dir: &str) {
+    let prefix = env::var("SCENARIO_ARTIFACTS_PREFIX").unwrap_or_default();
+    let mut reports: Vec<(String, PlanningStats)> = Vec::new();
+
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        if !entry.metadata().unwrap().is_dir() {
+            continue;
+        }
+        let Ok(raw) =
+            std::fs::read_to_string(entry.path().join("planning_stats.json"))
+        else {
+            continue;
+        };
+        let stats: PlanningStats = sonic_rs::from_str(&raw).unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let name = name.strip_prefix(&prefix).unwrap_or(&name).to_string();
+        reports.push((name, stats));
+    }
+
+    print_planning_tables(reports);
+}
+
+fn print_planning_tables(reports: Vec<(String, PlanningStats)>) {
+    let Some((_, first)) = reports.first() else {
+        eprintln!("No planning_stats.json found");
+        return;
+    };
+    let tiers: Vec<String> = first.tiers.iter().map(|t| t.tier.clone()).collect();
+
+    for tier in tiers {
+        let mut rows: Vec<(&str, &PlanningTierStats, f64)> = reports
+            .iter()
+            .filter_map(|(name, stats)| {
+                stats
+                    .tiers
+                    .iter()
+                    .find(|t| t.tier == tier)
+                    .map(|t| (name.as_str(), t, stats.success_rate))
+            })
+            .collect();
+        rows.sort_by(|a, b| a.1.overhead.p50.total_cmp(&b.1.overhead.p50));
+
+        println!("### Query planning: `{}` query", tier);
+        println!();
+        println!("Planning overhead (cold - warm), in ms:");
+        println!();
+        println!("| Gateway | p50 | p75 | p90 | p95 | p99 | p99.9 | max | Cold p50 | Cold p99 | Warm p50 | Warm p99 | Success Rate (%) |");
+        println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+        for (name, t, success_rate) in rows {
+            let o = &t.overhead;
+            println!(
+                "| {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.2} |",
+                name,
+                o.p50,
+                o.p75,
+                o.p90,
+                o.p95,
+                o.p99,
+                o.p99_9,
+                o.max,
+                t.cold.p50,
+                t.cold.p99,
+                t.warm.p50,
+                t.warm.p99,
+                success_rate * 100.0
+            );
+        }
+        println!();
+    }
 }
 
 fn read_file(filepath: &str) -> String {

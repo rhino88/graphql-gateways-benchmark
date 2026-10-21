@@ -13,10 +13,12 @@ This benchmark evaluates GraphQL federation gateways across multiple performance
 - **Latency**: Response times including P95 and P99.9 percentiles
 - **Resource Usage**: Maximum CPU and memory consumption during load
 - **Reliability**: Success rate under different load conditions
+- **Query Planning**: Time spent preparing (parsing, validating, normalizing and query planning) an operation the gateway has never seen before
 
-The benchmark supports two testing modes:
+The benchmark supports three testing modes:
 - **Constant Load**: Steady traffic with 50 virtual users to measure baseline efficiency
 - **Stress Testing**: Gradually increasing load to find breaking points and maximum capacity
+- **Query Planning**: Sequential cold vs. warm requests to measure per-operation planning cost
 
 ## Overview
 
@@ -48,6 +50,7 @@ The benchmark process is orchestrated by a `Makefile` and a series of bash scrip
 - `toolkit/`: A Rust crate with a command-line tool to process and summarize benchmark results.
 - `subgraphs/`: Contains the Rust source for the GraphQL subgraphs used for testing.
 - `k6.js`: The k6 script for load testing.
+- `k6-planning.js`: The k6 script for the query planning benchmark.
 - `monitor.sh`: Script to monitor CPU and memory usage of a process.
 - `test.sh`: Script to run the benchmark for a single gateway.
 - `Makefile`: Provides convenience commands to run the benchmarks.
@@ -85,36 +88,39 @@ The benchmark uses Unix-specific tools and commands that are not available on Wi
     This command will block, so run it in a separate terminal.
 
 3.  **Run Benchmarks**:
-    You can test a single gateway or all of them. You must specify a testing mode: `constant` or `stress`.
+    You can test a single gateway or all of them. You must specify a testing mode: `constant`, `stress` or `planning`.
 
     *   **Test a single gateway:**
         ```bash
-        make test gateway=<gateway_name> mode=<constant|stress>
+        make test gateway=<gateway_name> mode=<constant|stress|planning>
         ```
-        Replace `<gateway_name>` with one of: `apollo-router`,  `cosmo`, `grafbase`, `hive-gateway`, `hive-gateway-bun`, `hive-gateway-router-runtime`, `hive-gateway-router-runtime-bun`, or `hive-router`.
+        Replace `<gateway_name>` with one of: `apollo-gateway`, `apollo-router`, `apollo-router-v3`, `apollo-router-v3-incremental`, `cosmo`, `grafbase`, `hive-gateway`, `hive-gateway-router-runtime`, or `hive-router`.
 
         Examples:
         ```bash
         make test gateway=apollo-router mode=constant
         make test gateway=hive-router mode=stress
+        make test gateway=apollo-router-v3-incremental mode=planning
         ```
 
     *   **Test all gateways:**
         This will run the test for every gateway in the `gateways` directory and then print a summary table.
         ```bash
-        make test-all mode=<constant|stress>
+        make test-all mode=<constant|stress|planning>
         ```
 
         Examples:
         ```bash
         make test-all mode=constant
         make test-all mode=stress
+        make test-all mode=planning
         ```
 
 4.  **View Summary Manually**:
     If you have already run the tests and just want to see the summary table again:
     ```bash
     cargo run -p toolkit summary
+    cargo run -p toolkit planning-summary   # query planning results
     ```
 
     The summary output will look something like this:
@@ -137,3 +143,33 @@ The benchmark uses Unix-specific tools and commands that are not available on Wi
 - **Constant Mode** (`mode=constant`): Maintains steady traffic with 50 virtual users for 60 seconds to measure baseline performance and efficiency under normal load conditions.
 
 - **Stress Mode** (`mode=stress`): Gradually increases load to find the breaking point of each gateway, helping identify maximum capacity and reliability under pressure.
+
+- **Planning Mode** (`mode=planning`): Measures query planning cost. See [Query Planning Benchmark](#query-planning-benchmark).
+
+## Query Planning Benchmark
+
+Gateways cache the result of parsing, validating and planning an operation, so the throughput benchmarks above (which send the same query over and over) almost never plan anything. The planning benchmark (`k6-planning.js`) measures what the first request for a new operation costs.
+
+A single VU runs a fixed number of iterations (`PLANNING_ITERATIONS`, default `1000`, after `PLANNING_WARMUP_ITERATIONS`, default `50`). In each iteration, for each query tier, it sends:
+
+- **warm**: the exact same document every time, served from the gateway's caches.
+- **cold**: the same document with a unique operation name and unique aliases. Aliases shape the response, so they can't be normalized away, and every gateway's plan cache misses.
+
+Both requests do identical subgraph work, so the paired difference `cold - warm` (**planning overhead**) is the time the gateway spent preparing a new operation: parsing, validation, normalization and query planning. This works the same way for every gateway, but it isn't pure planner time. For example, Apollo Router's own `apollo.router.query_planning.plan.duration` metric accounts for roughly half of its overhead on these queries. Iterations alternate which request goes first so neither one consistently benefits from running second.
+
+Query tiers:
+
+| Tier | Description |
+| --- | --- |
+| `simple` | A single root field resolved by one subgraph |
+| `federated` | The query used by the throughput benchmarks: 4 subgraphs, `@requires`, `@provides`, nested entity fetches |
+| `complex` | 6 root fields with overlapping selections and deep chains of entity jumps across all subgraphs |
+
+Results are written to `gateways/<gateway>/planning_stats.json` and summarized with `cargo run -p toolkit planning-summary`.
+
+### Apollo Router v3 incremental planner
+
+`apollo-router-v3` and `apollo-router-v3-incremental` both run Apollo Router `v3.0.0-preview.0`. The only difference is that `apollo-router-v3-incremental` enables the new incremental (BULB) query planner (`supergraph.query_planning.incremental_planner.enabled: true`, default `beam_width: 16` and `fuel: 5000`). It builds plans field by field with bounded backtracking instead of exhaustively enumerating plan candidates.
+
+The incremental planner targets large supergraphs, where exhaustively enumerating plan candidates gets expensive. The 4-subgraph schema used here is small, so expect the two variants to be close.
+

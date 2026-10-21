@@ -110,3 +110,6 @@ jobs:
             gateways/${{ inputs.gateway }}/*.png
             gateways/${{ inputs.gateway }}/data.csv
             gateways/${{ inputs.gateway }}/stats.json
+            gateways/${{ inputs.gateway }}/k6_planning_summary.json
+            gateways/${{ inputs.gateway }}/k6_planning_summary.txt
+            gateways/${{ inputs.gateway }}/planning_stats.json
