@@ -42,6 +42,8 @@ jobs:
       waitForUrl: ${{ startsWith(matrix.directory, 'hive-gateway') && 'http://localhost:4000/healthcheck' || '' }}
 
   constant-vus-over-time-report:
+    # The report template comments on the PR and commits results.
+    permissions: write-all
     needs: constant-vus-over-time
     uses: ./.github/workflows/report.template.yaml
     secrets: inherit
@@ -146,6 +148,8 @@ jobs:
       waitForUrl: ${{ startsWith(matrix.directory, 'hive-gateway') && 'http://localhost:4000/healthcheck' || '' }}
 
   ramping-vus-report:
+    # The report template comments on the PR and commits results.
+    permissions: write-all
     needs: ramping-vus
     uses: ./.github/workflows/report.template.yaml
     secrets: inherit
@@ -184,6 +188,8 @@ jobs:
       waitForUrl: ${{ startsWith(matrix.directory, 'hive-gateway') && 'http://localhost:4000/healthcheck' || '' }}
 
   query-planning-report:
+    # The report template comments on the PR and commits results.
+    permissions: write-all
     needs: query-planning
     uses: ./.github/workflows/planning-report.template.yaml
     secrets: inherit
