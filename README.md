@@ -150,7 +150,7 @@ The benchmark uses Unix-specific tools and commands that are not available on Wi
 
 Gateways cache the result of parsing, validating and planning an operation, so the throughput benchmarks above (which send the same query over and over) almost never plan anything. The planning benchmark (`k6-planning.js`) measures what the first request for a new operation costs.
 
-A single VU runs a fixed number of iterations (`PLANNING_ITERATIONS`, default `200`, after `PLANNING_WARMUP_ITERATIONS`, default `50`). In each iteration, for each query tier, it sends:
+A single VU runs a fixed number of iterations (`PLANNING_ITERATIONS`, default `1000`, after `PLANNING_WARMUP_ITERATIONS`, default `50`). In each iteration, for each query tier, it sends:
 
 - **warm**: the exact same document every time, served from the gateway's caches.
 - **cold**: the same document with a unique operation name and unique aliases. Aliases shape the response, so they can't be normalized away, and every gateway's plan cache misses.

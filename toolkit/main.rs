@@ -20,17 +20,25 @@ struct Stats {
 }
 
 #[derive(Serialize, Deserialize)]
+struct Percentiles {
+    avg: f64,
+    min: f64,
+    p50: f64,
+    p75: f64,
+    p90: f64,
+    p95: f64,
+    p99: f64,
+    p99_9: f64,
+    max: f64,
+}
+
+#[derive(Serialize, Deserialize)]
 struct PlanningTierStats {
     tier: String,
     /// Paired (cold - warm) latency: time spent preparing a never-seen operation.
-    overhead_avg: f64,
-    overhead_med: f64,
-    overhead_p95: f64,
-    overhead_p99: f64,
-    cold_med: f64,
-    cold_p95: f64,
-    warm_med: f64,
-    warm_p95: f64,
+    overhead: Percentiles,
+    cold: Percentiles,
+    warm: Percentiles,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -262,6 +270,17 @@ fn planning_report(pwd: &str) {
             .and_then(|v| v.as_f64())
             .unwrap_or(f64::NAN)
     };
+    let percentiles = |name: &str| Percentiles {
+        avg: metric(name, "avg"),
+        min: metric(name, "min"),
+        p50: metric(name, "med"),
+        p75: metric(name, "p(75)"),
+        p90: metric(name, "p(90)"),
+        p95: metric(name, "p(95)"),
+        p99: metric(name, "p(99)"),
+        p99_9: metric(name, "p(99.9)"),
+        max: metric(name, "max"),
+    };
 
     let tiers = summary
         .get(&"tiers")
@@ -271,18 +290,10 @@ fn planning_report(pwd: &str) {
         .iter()
         .map(|t| {
             let tier = t.as_str().unwrap().to_string();
-            let overhead = format!("planning_{}_overhead", tier);
-            let cold = format!("planning_{}_cold", tier);
-            let warm = format!("planning_{}_warm", tier);
             PlanningTierStats {
-                overhead_avg: metric(&overhead, "avg"),
-                overhead_med: metric(&overhead, "med"),
-                overhead_p95: metric(&overhead, "p(95)"),
-                overhead_p99: metric(&overhead, "p(99)"),
-                cold_med: metric(&cold, "med"),
-                cold_p95: metric(&cold, "p(95)"),
-                warm_med: metric(&warm, "med"),
-                warm_p95: metric(&warm, "p(95)"),
+                overhead: percentiles(&format!("planning_{}_overhead", tier)),
+                cold: percentiles(&format!("planning_{}_cold", tier)),
+                warm: percentiles(&format!("planning_{}_warm", tier)),
                 tier,
             }
         })
@@ -349,23 +360,30 @@ fn print_planning_tables(reports: Vec<(String, PlanningStats)>) {
                     .map(|t| (name.as_str(), t, stats.success_rate))
             })
             .collect();
-        rows.sort_by(|a, b| a.1.overhead_med.total_cmp(&b.1.overhead_med));
+        rows.sort_by(|a, b| a.1.overhead.p50.total_cmp(&b.1.overhead.p50));
 
         println!("### Query planning: `{}` query", tier);
         println!();
-        println!(
-            "| Gateway | Planning overhead p50 (ms) | p95 (ms) | p99 (ms) | Cold p50 (ms) | Warm p50 (ms) | Success Rate (%) |"
-        );
-        println!("| --- | --- | --- | --- | --- | --- | --- |");
+        println!("Planning overhead (cold - warm), in ms:");
+        println!();
+        println!("| Gateway | p50 | p75 | p90 | p95 | p99 | p99.9 | max | Cold p50 | Cold p99 | Warm p50 | Warm p99 | Success Rate (%) |");
+        println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
         for (name, t, success_rate) in rows {
+            let o = &t.overhead;
             println!(
-                "| {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.2} |",
+                "| {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.2} |",
                 name,
-                t.overhead_med,
-                t.overhead_p95,
-                t.overhead_p99,
-                t.cold_med,
-                t.warm_med,
+                o.p50,
+                o.p75,
+                o.p90,
+                o.p95,
+                o.p99,
+                o.p99_9,
+                o.max,
+                t.cold.p50,
+                t.cold.p99,
+                t.warm.p50,
+                t.warm.p99,
                 success_rate * 100.0
             );
         }

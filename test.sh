@@ -9,7 +9,7 @@ set -Eeuo pipefail
 #   WARMUP_SECONDS=15
 #   MEASURE_SECONDS=60
 #   LOAD_MODE="constant"        # "constant", "stress" or "planning"
-#   PLANNING_ITERATIONS=200     # planning mode: measured iterations per query tier
+#   PLANNING_ITERATIONS=1000    # planning mode: measured iterations per query tier
 
 command -v realpath >/dev/null || { echo "realpath required"; exit 1; }
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"

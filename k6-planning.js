@@ -25,7 +25,7 @@ import { Rate, Trend } from "k6/metrics";
 import { textSummary } from "https://jslib.k6.io/k6-summary/0.0.1/index.js";
 
 const endpoint = __ENV.GATEWAY_ENDPOINT || "http://0.0.0.0:4000/graphql";
-const iterations = parseInt(__ENV.PLANNING_ITERATIONS || "200");
+const iterations = parseInt(__ENV.PLANNING_ITERATIONS || "1000");
 const warmupIterations = parseInt(__ENV.PLANNING_WARMUP_ITERATIONS || "50");
 // Unique per k6 run, so re-running against an already running gateway still
 // produces never-seen-before operations.
@@ -241,7 +241,17 @@ for (const tier of TIERS) {
 }
 const successRate = new Rate("success_rate");
 
-const summaryTrendStats = ["avg", "min", "med", "max", "p(90)", "p(95)", "p(99)"];
+const summaryTrendStats = [
+  "avg",
+  "min",
+  "med",
+  "max",
+  "p(75)",
+  "p(90)",
+  "p(95)",
+  "p(99)",
+  "p(99.9)",
+];
 
 export const options = {
   scenarios: {
